@@ -28,6 +28,9 @@ type
     procedure OnMessageReceived(Buddy: TBarevBuddy; const MessageText: string);
     procedure OnConnectionState(Buddy: TBarevBuddy; State: TConnectionState);
 
+    // --- Typing notifications ---
+    procedure OnTypingNotification(Buddy: TBarevBuddy; IsTyping: Boolean);
+
     // --- File transfer events ---
     procedure OnFTOffer(Buddy: TBarevBuddy; const Sid, FileName: string; FileSize: Int64);
     procedure OnFTProgress(Buddy: TBarevBuddy; const Sid: string; BytesDone, BytesTotal: Int64);
@@ -83,6 +86,17 @@ begin
     FClient.Process;
     Sleep(20); // 20ms is fine for interactive
   end;
+end;
+
+procedure TEventHandler.OnTypingNotification(Buddy: TBarevBuddy; IsTyping: Boolean);
+begin
+  WriteLn;
+  if IsTyping then
+    WriteLn('*** ', Buddy.Nick, ' is typing...')
+  else
+    WriteLn('*** ', Buddy.Nick, ' stopped typing');
+  Write('> ');
+  Flush(Output);
 end;
 
 procedure TEventHandler.OnLog(const LogLevel, Message: string);
@@ -167,11 +181,26 @@ begin
   WriteLn('  connect <nick@ipv6>   - Connect to a buddy');
   WriteLn('  msg <nick@ipv6> <text> - Send a message');
   WriteLn('  status <status> [msg] - Set your status (available/away/dnd)');
-  WriteLn('  load <file>           - Load contacts from file');
-  WriteLn('  save <file>           - Save contacts to file');
+ WriteLn;
+  WriteLn('  --- Configuration ---');
+  WriteLn('  loadconfig <file>     - Load configuration from file');
+  WriteLn('  saveconfig            - Save current configuration');
+  WriteLn;
+  WriteLn('  --- Avatars ---');
+  WriteLn('  setavatar <path>      - Set your avatar image');
+  WriteLn('  clearavatar           - Remove your avatar');
+  WriteLn('  getavatar <nick@ipv6> - Request buddy''s avatar');
+  WriteLn('  showavatarhash        - Show your current avatar hash');
+  WriteLn;
+  WriteLn('  --- Typing Notifications ---');
+  WriteLn('  typing <nick@ipv6>    - Send typing notification');
+  WriteLn('  paused <nick@ipv6>    - Send paused notification');
+  WriteLn;
+  WriteLn('  --- File Transfer ---');
   WriteLn('  sendfile <nick@ipv6> <path>      - Offer a file to buddy');
   WriteLn('  acceptfile <sid> <saveas>        - Accept an incoming offer');
   WriteLn('  rejectfile <sid>                 - Reject an incoming offer');
+  WriteLn;
   WriteLn('  quit                  - Exit the program');
   WriteLn;
 end;
@@ -278,6 +307,8 @@ begin
   Client.OnBuddyStatus     := @Handler.OnBuddyStatus;
   Client.OnMessageReceived := @Handler.OnMessageReceived;
   Client.OnConnectionState := @Handler.OnConnectionState;
+
+  Client.OnTypingNotification := @Handler.OnTypingNotification;
 
   // ---- File transfer event hooks (FPC-friendly) ----
   if Assigned(Client.FileTransfer) then
@@ -411,31 +442,139 @@ begin
             end;
           end;
 
-        'load':
-          begin
-            if Parts.Count < 2 then
-              WriteLn('Usage: load <filename>')
-            else
+          { Configuration commands }
+          'loadconfig':
             begin
-              if Client.LoadContactsFromFile(Parts[1]) then
-                WriteLn('Loaded contacts from ', Parts[1])
+              if Parts.Count < 2 then
+                WriteLn('Usage: loadconfig <file>')
               else
-                WriteLn('Failed to load contacts from ', Parts[1]);
+              begin
+                if Client.LoadConfig(Parts[1]) then
+                begin
+                  WriteLn('Configuration loaded from: ', Parts[1]);
+                  WriteLn('Nick: ', Client.Nick);
+                  WriteLn('IPv6: ', Client.MyIPv6);
+                  WriteLn('Port: ', Client.Port);
+                  if Client.AvatarManager.MyAvatarHash <> '' then
+                    WriteLn('Avatar: ', Client.AvatarManager.MyAvatarPath);
+                  WriteLn('Contacts loaded: ', Client.GetBuddyCount);
+                end
+                else
+                  WriteLn('Failed to load configuration');
+              end;
             end;
-          end;
 
-        'save':
-          begin
-            if Parts.Count < 2 then
-              WriteLn('Usage: save <filename>')
-            else
+          'saveconfig':
             begin
-              if Client.SaveContactsToFile(Parts[1]) then
-                WriteLn('Saved contacts to ', Parts[1])
+              if Client.SaveConfig then
+                WriteLn('Configuration saved')
               else
-                WriteLn('Failed to save contacts to ', Parts[1]);
+                WriteLn('Failed to save configuration');
             end;
-          end;
+
+          { Avatar commands }
+          'setavatar':
+            begin
+              if Parts.Count < 2 then
+                WriteLn('Usage: setavatar <path>')
+              else
+              begin
+                // Join path if it contains spaces
+                Command := '';
+                for i := 1 to Parts.Count - 1 do
+                begin
+                  if i > 1 then Command := Command + ' ';
+                  Command := Command + Parts[i];
+                end;
+
+                if Client.LoadMyAvatar(Command) then
+                begin
+                  WriteLn('Avatar loaded successfully');
+                  WriteLn('Hash: ', Client.GetMyAvatarHash);
+                  // Re-send presence to broadcast new avatar
+                  Client.SendPresence;
+                end
+                else
+                  WriteLn('Failed to load avatar');
+              end;
+            end;
+
+          'clearavatar':
+            begin
+              Client.ClearMyAvatar;
+              WriteLn('Avatar cleared');
+              // Re-send presence to broadcast avatar removal
+              Client.SendPresence;
+            end;
+
+          'getavatar':
+            begin
+              if Parts.Count < 2 then
+                WriteLn('Usage: getavatar <nick@ipv6>')
+              else
+              begin
+                if Client.RequestBuddyAvatar(Parts[1]) then
+                  WriteLn('Avatar request sent to ', Parts[1])
+                else
+                  WriteLn('Failed to request avatar from ', Parts[1]);
+              end;
+            end;
+
+          'showavatarhash':
+            begin
+              if Client.GetMyAvatarHash <> '' then
+                WriteLn('Your avatar hash: ', Client.GetMyAvatarHash)
+              else
+                WriteLn('No avatar set');
+            end;
+
+          { Typing notification commands }
+          'typing':
+            begin
+              if Parts.Count < 2 then
+                WriteLn('Usage: typing <nick@ipv6>')
+              else
+              begin
+                if Client.SendTyping(Parts[1]) then
+                  WriteLn('Typing notification sent to ', Parts[1])
+                else
+                  WriteLn('Failed to send typing notification');
+              end;
+            end;
+            
+          'paused':
+            begin
+              if Parts.Count < 2 then
+                WriteLn('Usage: paused <nick@ipv6>')
+              else
+              begin
+                if Client.SendPaused(Parts[1]) then
+                  WriteLn('Paused notification sent to ', Parts[1])
+                else
+                  WriteLn('Failed to send paused notification');
+              end;
+            end;
+            
+          'enabletyping':
+            begin
+              Client.TypingNotificationsEnabled := True;
+              WriteLn('Typing notifications enabled');
+            end;
+
+          'disabletyping':
+            begin
+              Client.TypingNotificationsEnabled := False;
+              WriteLn('Typing notifications disabled');
+            end;
+
+          'typingstatus':
+            begin
+              if Client.TypingNotificationsEnabled then
+                WriteLn('Typing notifications: ENABLED')
+              else
+                WriteLn('Typing notifications: DISABLED');
+            end;
+
          'sendfile':
            begin
              if Parts.Count < 3 then

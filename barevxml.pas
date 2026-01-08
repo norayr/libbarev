@@ -60,6 +60,7 @@ function BuildIQ(const IQType, ID, FromJID, ToJID: string;
 { Parsing functions }
 function ExtractElementName(const XML: string): string;
 function ExtractAttribute(const XML, AttrName: string): string;
+function ExtractIQAttribute(const XML, AttrName: string): string;  // Extracts from first <iq> tag only
 function ExtractElementContent(const XML, ElementName: string): string;
 function IsStreamStart(const XML: string): Boolean;
 function IsStreamEnd(const XML: string): Boolean;
@@ -374,6 +375,62 @@ begin
     Inc(EndPos);
   
   Result := Copy(XML, StartPos, EndPos - StartPos);
+  Result := XMLUnescape(Result);
+end;
+
+{ ExtractIQAttribute - Extracts attribute from FIRST <iq> tag only }
+function ExtractIQAttribute(const XML, AttrName: string): string;
+var
+  IQStart, IQEnd, AttrPos, StartPos, EndPos: Integer;
+  IQTag, SearchStr: string;
+begin
+  Result := '';
+  
+  // Find the first <iq tag
+  IQStart := Pos('<iq ', XML);
+  if IQStart = 0 then
+  begin
+    IQStart := Pos('<iq>', XML);
+    if IQStart = 0 then Exit;
+  end;
+  
+  // Find the end of the opening <iq> tag (the '>' character)
+  IQEnd := IQStart;
+  while (IQEnd <= Length(XML)) and (XML[IQEnd] <> '>') do
+    Inc(IQEnd);
+  
+  if IQEnd > Length(XML) then Exit;
+  
+  // Extract just the <iq> tag
+  IQTag := Copy(XML, IQStart, IQEnd - IQStart + 1);
+  
+  // Now search for the attribute within this tag only
+  SearchStr := AttrName + '="';
+  AttrPos := Pos(SearchStr, IQTag);
+  
+  if AttrPos = 0 then
+  begin
+    // Try single quotes
+    SearchStr := AttrName + '=''';
+    AttrPos := Pos(SearchStr, IQTag);
+    if AttrPos = 0 then Exit;
+    
+    // Extract with single quotes
+    StartPos := AttrPos + Length(SearchStr);
+    EndPos := StartPos;
+    while (EndPos <= Length(IQTag)) and (IQTag[EndPos] <> '''') do
+      Inc(EndPos);
+    Result := Copy(IQTag, StartPos, EndPos - StartPos);
+    Exit;
+  end;
+  
+  // Extract with double quotes
+  StartPos := AttrPos + Length(SearchStr);
+  EndPos := StartPos;
+  while (EndPos <= Length(IQTag)) and (IQTag[EndPos] <> '"') do
+    Inc(EndPos);
+  
+  Result := Copy(IQTag, StartPos, EndPos - StartPos);
   Result := XMLUnescape(Result);
 end;
 

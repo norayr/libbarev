@@ -33,6 +33,9 @@ const
   STREAM_NAMESPACE = 'http://etherx.jabber.org/streams';
   JABBER_CLIENT_NS = 'jabber:client';
   PING_NAMESPACE = 'urn:xmpp:ping';
+  VCARD_NAMESPACE = 'vcard-temp';
+  VCARD_UPDATE_NAMESPACE = 'vcard-temp:x:update';
+  CHATSTATES_NAMESPACE = 'http://jabber.org/protocol/chatstates';
 
 type
   { Connection state }
@@ -85,6 +88,9 @@ type
     FConnection: TBarevConnection;
     FLastActivity: TDateTime;
     FPingFailures: Integer;
+    FAvatarHash: string;       // SHA1 hash of avatar
+    FAvatarData: string;       // Base64 encoded avatar image data
+    FAvatarMimeType: string;   // MIME type of avatar (e.g., image/png)
   public
     constructor Create(const ANick, AIPv6: string; APort: Word = BAREV_DEFAULT_PORT);
     destructor Destroy; override;
@@ -98,6 +104,9 @@ type
     property Connection: TBarevConnection read FConnection write FConnection;
     property LastActivity: TDateTime read FLastActivity write FLastActivity;
     property PingFailures: Integer read FPingFailures write FPingFailures;
+    property AvatarHash: string read FAvatarHash write FAvatarHash;
+    property AvatarData: string read FAvatarData write FAvatarData;
+    property AvatarMimeType: string read FAvatarMimeType write FAvatarMimeType;
   end;
 
   { Connection to a single buddy }
@@ -136,11 +145,12 @@ function GenerateID(const Prefix: string = ''): string;
 function IsYggdrasilAddress(const Address: string): Boolean;
 function ParseJID(const JID: string; out Nick, Address: string): Boolean;
 function NormalizeIPv6(const S: string): string;
+function ComputeSHA1Hash(const Data: string): string;
 
 implementation
 
 uses
-  DateUtils;
+  DateUtils, SHA1;
 
 function NormalizeIPv6(const S: string): string;
 var
@@ -157,15 +167,17 @@ constructor TBarevBuddy.Create(const ANick, AIPv6: string; APort: Word);
 begin
   inherited Create;
   FNick := ANick;
-  //FIPv6Address := AIPv6;
   FIPv6Address := NormalizeIPv6(AIPv6);
   FPort := APort;
-  FJID := ANick + '@' + AIPv6;
+  FJID := ANick + '@' + FIPv6Address;  // Use normalized IPv6 for JID
   FStatus := bsOffline;
   FStatusMessage := '';
   FConnection := nil;
   FLastActivity := Now;
   FPingFailures := 0;
+  FAvatarHash := '';
+  FAvatarData := '';
+  FAvatarMimeType := '';
 end;
 
 destructor TBarevBuddy.Destroy;
@@ -285,6 +297,22 @@ begin
   Address := Copy(JID, AtPos + 1, Length(JID));
 
   Result := (Nick <> '') and (Address <> '');
+end;
+
+function ComputeSHA1Hash(const Data: string): string;
+var
+  Digest: TSHA1Digest;
+  i: Integer;
+begin
+  Result := '';
+  if Data = '' then Exit;
+  
+  Digest := SHA1String(Data);
+  
+  // Convert to hex string
+  Result := '';
+  for i := 0 to 19 do
+    Result := Result + LowerCase(IntToHex(Digest[i], 2));
 end;
 
 end.

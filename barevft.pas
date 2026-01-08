@@ -198,7 +198,7 @@ uses
 {$IFDEF WINDOWS}
   WinSock2,
 {$ENDIF}
-  StrUtils;
+  StrUtils, BarevXML;
 
 
 function Socks5_ServerHandshake(CSock: TSocket): Boolean;
@@ -794,7 +794,7 @@ var
   IQType: string;
   HasSI, HasBytestreams: Boolean;
 begin
-  IQType := Trim(ExtractAttribute(XML, 'type'));
+  IQType := Trim(ExtractIQAttribute(XML, 'type'));  // Use ExtractIQAttribute to get type from <iq> tag only
 
   Log('DEBUG', 'FT: HandleIQ type=' + IQType + ' from ' + Buddy.JID);
 
@@ -1146,4 +1146,3 @@ begin
 end;
 
 end.
-

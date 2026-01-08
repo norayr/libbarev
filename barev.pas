@@ -11,9 +11,10 @@ interface
 
 uses
   Classes, SysUtils, Sockets, DateUtils,
-  BarevTypes, BarevXML, BarevNet, BarevFT;
+  BarevTypes, BarevConfig, BarevAvatar, BarevChatStates, BarevXML, BarevNet, BarevFT;
 
 type
+  TypingNotificationProc =  procedure(Buddy: TBarevBuddy; IsTyping: Boolean) of object;
   { Main Barev client }
   TBarevClient = class
   private
@@ -26,6 +27,10 @@ type
     FBuddies: TList; // List of TBarevBuddy
     FRunning: Boolean;
     FContactsFile: string;
+    FAvatarManager: TBarevAvatarManager;
+    FConfig: TBarevConfig;
+    FTypingNotificationsEnabled: Boolean;
+    FOnTypingNotification: procedure(Buddy: TBarevBuddy; IsTyping: Boolean) of object;
 
     { Event handlers }
     FOnBuddyStatus: TBuddyStatusEvent;
@@ -74,9 +79,21 @@ type
     // This one apparently is not needed because source port is chosen by OS randomly
     function FindBuddyByIPAndPort(const IP: string; Port: Word): TBarevBuddy;
 
-    { Contact list file }
+    { Config file }
     function LoadContactsFromFile(const FileName: string): Boolean;
     function SaveContactsToFile(const FileName: string): Boolean;
+    function LoadConfig(const ConfigFile: string): Boolean;
+    function SaveConfig: Boolean;
+
+    { Avatar }
+    function LoadMyAvatar(const FilePath: string): Boolean;
+    procedure ClearMyAvatar;
+    function GetMyAvatarHash: string;
+    function RequestBuddyAvatar(const BuddyJid: string): Boolean;
+
+    { Typing notifications }
+    function SendTyping(const BuddyJID: string): Boolean;
+    function SendPaused(const BuddyJID: string): Boolean;
 
     { Communication }
     function ConnectToBuddy(const BuddyJID: string): Boolean;
@@ -91,6 +108,8 @@ type
     property Port: Word read FPort;
     property Running: Boolean read FRunning;
     property ContactsFile: string read FContactsFile write FContactsFile;
+    property AvatarManager: TBarevAvatarManager read FAvatarManager;
+    property TypingNotificationsEnabled: Boolean read FTypingNotificationsEnabled write FTypingNotificationsEnabled;
 
     { Event handlers }
     property OnBuddyStatus: TBuddyStatusEvent read FOnBuddyStatus write FOnBuddyStatus;
@@ -98,6 +117,7 @@ type
     property OnConnectionState: TConnectionStateEvent read FOnConnectionState write FOnConnectionState;
     property OnLog: TLogEvent read FOnLog write FOnLog;
     property FileTransfer: TBarevFTManager read FFileTransfer;
+    property OnTypingNotification: TypingNotificationProc read FOnTypingNotification write FOnTypingNotification;
   end;
 
 implementation
@@ -105,11 +125,39 @@ implementation
 uses
   StrUtils;
 
+{ Helper function to normalize JID for comparison }
+{ Uses NormalizeIPv6 from BarevTypes unit }
+function NormalizeJID(const JID: string): string;
+var
+  AtPos: Integer;
+  Nick, IPv6: string;
+begin
+  AtPos := Pos('@', JID);
+  if AtPos = 0 then
+  begin
+    Result := LowerCase(JID);
+    Exit;
+  end;
+  
+  Nick := Copy(JID, 1, AtPos - 1);
+  IPv6 := Copy(JID, AtPos + 1, Length(JID) - AtPos);
+  
+  // Normalize the IPv6 part using barevtypes.NormalizeIPv6
+  IPv6 := NormalizeIPv6(IPv6);
+  
+  Result := LowerCase(Nick) + '@' + IPv6;
+end;
+
 { TBarevClient }
 
 constructor TBarevClient.Create(const ANick, AMyIPv6: string; APort: Word);
 begin
   inherited Create;
+
+  FAvatarManager := TBarevAvatarManager.Create;
+  FConfig := nil; // Will be created when LoadConfig is called
+  FOnTypingNotification := nil;
+  FTypingNotificationsEnabled := True;
 
   FNick := ANick;
   FMyIPv6 := AMyIPv6;
@@ -147,8 +195,193 @@ begin
 
   FreeAndNil(FFileTransfer);
   FSocketManager.Free;
+
+  FreeAndNil(FAvatarManager);
+  FreeAndNil(FConfig);
+
   inherited;
 end;
+
+// config
+function TBarevClient.LoadConfig(const ConfigFile: string): Boolean;
+var
+  i: Integer;
+  Contact: TConfigContact;
+  Buddy: TBarevBuddy;
+begin
+  Result := False;
+
+  if not Assigned(FConfig) then
+    FConfig := TBarevConfig.Create(ConfigFile);
+
+  if not FConfig.Load then
+    Exit;
+
+  // Load user settings
+  FNick := FConfig.UserNick;
+  FMyIPv6 := FConfig.UserIPv6;
+  FPort := FConfig.UserPort;
+  FMyJID := FNick + '@' + FMyIPv6;
+
+  // Load avatar if configured
+  if (FConfig.UserAvatarPath <> '') and FileExists(FConfig.UserAvatarPath) then
+    FAvatarManager.LoadMyAvatar(FConfig.UserAvatarPath);
+
+  // Load contacts as buddies
+  for i := 0 to FConfig.GetContactCount - 1 do
+  begin
+    Contact := FConfig.GetContact(i);
+    Buddy := AddBuddy(Contact.Nick, Contact.IPv6, Contact.Port);
+
+    // If we have a cached avatar path, we could load it here
+    // (not implemented yet - would need to parse the avatar file)
+  end;
+
+  Result := True;
+end;
+
+function TBarevClient.SaveConfig: Boolean;
+var
+  i: Integer;
+  Buddy: TBarevBuddy;
+  DefaultConfigPath: string;
+begin
+  Result := False;
+
+  // If config not loaded, create one with default path
+  if not Assigned(FConfig) then
+  begin
+    DefaultConfigPath := GetUserDir + '.barev' + PathDelim + 'barev.ini';
+    if not DirectoryExists(GetUserDir + '.barev') then
+      ForceDirectories(GetUserDir + '.barev');
+    FConfig := TBarevConfig.Create(DefaultConfigPath);
+    Log('INFO', 'Created new config file: ' + DefaultConfigPath);
+  end;
+
+  // Save user settings
+  FConfig.UserNick := FNick;
+  FConfig.UserIPv6 := FMyIPv6;
+  FConfig.UserPort := FPort;
+  FConfig.UserAvatarPath := FAvatarManager.MyAvatarPath;
+
+  // Save contacts
+  FConfig.ClearContactList;
+  for i := 0 to FBuddies.Count - 1 do
+  begin
+    Buddy := TBarevBuddy(FBuddies[i]);
+    FConfig.AddContact(Buddy.Nick, Buddy.IPv6Address, Buddy.Port);
+  end;
+
+  Result := FConfig.Save;
+end;
+
+// avatar
+
+function TBarevClient.LoadMyAvatar(const FilePath: string): Boolean;
+begin
+  Result := FAvatarManager.LoadMyAvatar(FilePath);
+
+  if Result then
+  begin
+    Log('INFO', 'Avatar loaded: ' + FilePath);
+    Log('INFO', 'Avatar hash: ' + FAvatarManager.MyAvatarHash);
+
+    // Update config if we have one
+    if Assigned(FConfig) then
+    begin
+      FConfig.UserAvatarPath := FilePath;
+      SaveConfig;
+    end;
+  end;
+end;
+
+procedure TBarevClient.ClearMyAvatar;
+begin
+  FAvatarManager.ClearMyAvatar;
+
+  if Assigned(FConfig) then
+  begin
+    FConfig.UserAvatarPath := '';
+    SaveConfig;
+  end;
+end;
+
+function TBarevClient.GetMyAvatarHash: string;
+begin
+  Result := FAvatarManager.MyAvatarHash;
+end;
+
+function TBarevClient.RequestBuddyAvatar(const BuddyJID: string): Boolean;
+var
+  Buddy: TBarevBuddy;
+  IQ, VCardReq: string;
+  IQ_ID: string;
+begin
+  Result := False;
+
+  Buddy := FindBuddyByJID(BuddyJID);
+  if not Assigned(Buddy) then
+    Exit;
+
+  if not Assigned(Buddy.Connection) then
+    Exit;
+
+  // Check if connection is authenticated (csOnline might not be set in all cases)
+  if not (Buddy.Connection.State in [csAuthenticated, csOnline]) then
+    Exit;
+
+  IQ_ID := GenerateID('vcard');
+
+  IQ := '<iq type=''get'' to=''' + XMLEscape(BuddyJID) + ''' id=''' + IQ_ID + '''>' +
+        '<vCard xmlns=''vcard-temp''/>' +
+        '</iq>';
+
+  Result := SendToBuddy(Buddy, IQ);
+
+  if Result then
+    Log('INFO', 'Requested avatar from ' + BuddyJID);
+end;
+
+// typing
+
+function TBarevClient.SendTyping(const BuddyJID: string): Boolean;
+var
+  Buddy: TBarevBuddy;
+  Stanza: string;
+begin
+  Result := False;
+  if not FTypingNotificationsEnabled then
+    Exit;
+
+  Buddy := FindBuddyByJID(BuddyJID);
+  if not Assigned(Buddy) then
+    Exit;
+
+  Stanza := TBarevChatStates.GenerateChatState(csComposing, BuddyJID);
+  Result := SendToBuddy(Buddy, Stanza);
+end;
+
+function TBarevClient.SendPaused(const BuddyJID: string): Boolean;
+var
+  Buddy: TBarevBuddy;
+  Stanza: string;
+begin
+  Result := False;
+
+  if not FTypingNotificationsEnabled then
+    Exit;
+
+  Buddy := FindBuddyByJID(BuddyJID);
+  if not Assigned(Buddy) then
+    Exit;
+
+  // Bonjour compatibility: send 'active' instead of 'paused'
+  // Pidgin's Bonjour implementation only recognizes composing and active
+  Stanza := TBarevChatStates.GenerateChatState(csActive, BuddyJID);
+  Result := SendToBuddy(Buddy, Stanza);
+end;
+
+
 
 // file transfers
 
@@ -194,16 +427,82 @@ end;
 procedure TBarevClient.HandleIQ(Buddy: TBarevBuddy; const XML: string);
 var
   Clean: string;
+  IQType, IQ_ID: string;
+  VCardXML: string;
+  AvatarData, MimeType, AvatarHash: string;
+  SavePath: string;
 begin
   Clean := StripLeadingXMLDecl(XML);
+  
+  Log('DEBUG', 'HandleIQ from ' + Buddy.Nick + ': ' + Clean);
 
-  if Assigned(FFileTransfer) then
+  // Check for vCard requests FIRST (before file transfer)
+  if (Pos('<vCard xmlns=''vcard-temp''', Clean) > 0) or 
+     (Pos('<vCard xmlns="vcard-temp"', Clean) > 0) then
   begin
-    FFileTransfer.HandleIQ(Buddy, Clean);
+    Log('DEBUG', 'Detected vCard request');
+    IQType := ExtractIQAttribute(Clean, 'type');
+    IQ_ID := ExtractIQAttribute(Clean, 'id');
+    
+    Log('DEBUG', 'vCard IQType=' + IQType + ' ID=' + IQ_ID);
+
+    if IQType = 'get' then
+    begin
+      // Send our vCard
+      VCardXML := '<iq type=''result'' to=''' + XMLEscape(Buddy.JID) + ''' id=''' + IQ_ID + '''>' +
+                  FAvatarManager.GenerateMyVCard +
+                  '</iq>';
+      SendToBuddy(Buddy, VCardXML);
+      Log('INFO', 'Sent vCard to ' + Buddy.Nick);
+    end
+    else if IQType = 'result' then
+    begin
+      Log('DEBUG', 'Processing vCard result');
+      // Parse received vCard
+      if FAvatarManager.ParseVCardAvatar(Clean, AvatarData, MimeType, AvatarHash) then
+      begin
+        Log('DEBUG', 'ParseVCardAvatar succeeded: hash=' + AvatarHash);
+        // Save avatar
+        Buddy.AvatarData := AvatarData;
+        Buddy.AvatarMimeType := MimeType;
+        Buddy.AvatarHash := AvatarHash;
+
+        SavePath := FAvatarManager.SaveBuddyAvatar(Buddy.Nick, Buddy.IPv6Address,
+                                                     AvatarData, MimeType);
+        if SavePath <> '' then
+          Log('INFO', 'Saved avatar for ' + Buddy.Nick + ' to ' + SavePath)
+        else
+          Log('WARN', 'Failed to save avatar for ' + Buddy.Nick);
+      end
+      else
+      begin
+        Log('WARN', 'ParseVCardAvatar failed for ' + Buddy.Nick);
+      end;
+    end
+    else
+    begin
+      Log('WARN', 'vCard with unhandled type: ' + IQType);
+    end;
     Exit;
   end;
 
-  Log('DEBUG', 'Unhandled <iq> from ' + Buddy.JID + ': ' + Clean);
+  // Check for ping/pong (standard XMPP IQ)
+  if Pos('<ping xmlns=''urn:xmpp:ping''', Clean) > 0 then
+  begin
+    // This is a ping, handle it
+    IQ_ID := ExtractIQAttribute(Clean, 'id');
+    VCardXML := '<iq type=''result'' to=''' + XMLEscape(Buddy.JID) + ''' id=''' + IQ_ID + '''/>';
+    SendToBuddy(Buddy, VCardXML);
+    Log('DEBUG', 'Responded to ping from ' + Buddy.Nick);
+    Exit;
+  end;
+
+  // Now check file transfer
+  if Assigned(FFileTransfer) then
+  begin
+    FFileTransfer.HandleIQ(Buddy, Clean);
+    // Don't exit - FT handler will log if unhandled
+  end;
 end;
 
 
@@ -545,7 +844,8 @@ begin
   Log('INFO', 'Stream start received from ' + FromJID);
 
   // SECURITY: Validate that the JID in the stream header matches expected buddy
-  if not SameText(FromJID, Buddy.JID) then
+  // Normalize both JIDs to handle IPv6 case differences and leading zeros
+  if NormalizeJID(FromJID) <> NormalizeJID(Buddy.JID) then
   begin
     Log('ERROR', 'Security: JID mismatch! Expected ' + Buddy.JID + ' but got ' + FromJID);
     Log('ERROR', 'Security: Rejecting connection from ' + FromJID);
@@ -557,7 +857,7 @@ begin
 
   Conn.StreamStartReceived := True;
 
-  // If we haven't sent our stream start yet, send it now
+  // If we haven not sent our stream start yet, send it now
   if not Conn.StreamStartSent then
   begin
     Response := BuildStreamHeader(FMyJID, Buddy.JID);
@@ -580,6 +880,8 @@ var
   ShowElement: string;
   StatusElement: string;
   OldStatus: TBuddyStatus;
+  PhotoHash: string;
+  PhotoStart, PhotoEnd: Integer;
 begin
   OldStatus := Buddy.Status;
 
@@ -606,11 +908,31 @@ begin
 
   Log('INFO', Buddy.JID + ' is now ' + StatusToString(Buddy.Status));
   TriggerBuddyStatus(Buddy, OldStatus, Buddy.Status);
+
+  if Pos('<x xmlns="' + VCARD_UPDATE_NAMESPACE + '"', XML) > 0 then
+  begin
+    PhotoStart := Pos('<photo>', XML);
+    PhotoEnd := Pos('</photo>', XML);
+
+    if (PhotoStart > 0) and (PhotoEnd > 0) then
+    begin
+      PhotoHash := Copy(XML, PhotoStart + 7, PhotoEnd - PhotoStart - 7);
+
+      // If hash changed and is not empty, request the avatar
+      if (PhotoHash <> '') and (PhotoHash <> Buddy.AvatarHash) then
+      begin
+        Log('INFO', 'Avatar update detected for ' + Buddy.Nick + ', requesting...');
+        RequestBuddyAvatar(Buddy.JID);
+      end;
+    end;
+  end;
 end;
 
 procedure TBarevClient.HandleMessage(Buddy: TBarevBuddy; const XML: string);
 var
   Body: string;
+  ChatState: TChatState;
+  IsTyping: Boolean;
 begin
   Body := ExtractElementContent(XML, 'body');
 
@@ -619,6 +941,26 @@ begin
     Log('INFO', 'Message from ' + Buddy.JID + ': ' + Body);
     TriggerMessageReceived(Buddy, Body);
   end;
+
+  // Process chat state notifications if enabled
+  if FTypingNotificationsEnabled then
+  begin
+    ChatState := TBarevChatStates.ParseChatState(XML);
+
+    if ChatState = csComposing then
+    begin
+      IsTyping := True;
+      if Assigned(FOnTypingNotification) then
+        FOnTypingNotification(Buddy, IsTyping);
+    end
+    else if ChatState = csPaused then
+    begin
+      IsTyping := False;
+      if Assigned(FOnTypingNotification) then
+        FOnTypingNotification(Buddy, IsTyping);
+    end;
+  end;
+
 end;
 
 procedure TBarevClient.HandlePing(Buddy: TBarevBuddy; const XML: string);
@@ -646,11 +988,14 @@ end;
 function TBarevClient.FindBuddyByJID(const JID: string): TBarevBuddy;
 var
   i: Integer;
+  NormalizedSearchJID: string;
 begin
   Result := nil;
+  NormalizedSearchJID := NormalizeJID(JID);
+  
   for i := 0 to FBuddies.Count - 1 do
   begin
-    if TBarevBuddy(FBuddies[i]).JID = JID then
+    if NormalizeJID(TBarevBuddy(FBuddies[i]).JID) = NormalizedSearchJID then
     begin
       Result := TBarevBuddy(FBuddies[i]);
       Break;
@@ -781,7 +1126,7 @@ begin
       // Format: nick@ipv6_address or nick@ipv6_address:port
       if ParseJID(Line, BuddyNick, Address) then
       begin
-        // Check for port - find LAST colon and see if it's followed by digits
+        // Check for port - find LAST colon and see if it is followed by digits
         ColonPos := 0;
         for j := Length(Address) downto 1 do
         begin
@@ -926,6 +1271,7 @@ function TBarevClient.SendPresence(Status: TBuddyStatus; const StatusMessage: st
 var
   i: Integer;
   Buddy: TBarevBuddy;
+  AvatarUpdate: string;
 begin
   Result := True;
 
@@ -947,6 +1293,8 @@ function TBarevClient.SendPresenceToBuddy(const BuddyJID: string;
 var
   Buddy: TBarevBuddy;
   PresenceXML: string;
+  AvatarUpdate: string;
+  InsertPos: Integer;
 begin
   Result := False;
 
@@ -954,6 +1302,16 @@ begin
   if not Assigned(Buddy) or not Assigned(Buddy.Connection) then Exit;
 
   PresenceXML := BuildPresence('', Status, StatusMessage);
+  Result := FSocketManager.SendData(Buddy.Connection.Socket, PresenceXML) > 0;
+
+  if FAvatarManager.MyAvatarHash <> '' then
+  begin
+    AvatarUpdate := FAvatarManager.GenerateAvatarUpdate;
+    InsertPos := Pos('</presence>', PresenceXML);
+    if InsertPos > 0 then
+      Insert(AvatarUpdate, PresenceXML, InsertPos);
+  end;
+
   Result := FSocketManager.SendData(Buddy.Connection.Socket, PresenceXML) > 0;
 
   if Result then
