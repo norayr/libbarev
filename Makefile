@@ -34,4 +34,7 @@ install-units:
 	$(FPC) $(FPCFLAGS)  -fPIC barevnet.pas
 	$(FPC) $(FPCFLAGS)  -fPIC barev.pas
 
+build_ctest:
+		gcc -O2 -Wall test_barev_c_api.c -L. -lbarev_c_api -Wl,-rpath,'$ORIGIN' -o test_barev
+
 .PHONY: all clean install-units
