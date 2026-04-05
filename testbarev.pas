@@ -11,7 +11,7 @@ uses
   {$IFDEF UNIX}
   cthreads,
   {$ENDIF}
-  Classes, SysUtils, Barev, BarevTypes;
+  Classes, SysUtils, Barev, BarevTypes, BarevConfig;
 
 const
   // Log levels
@@ -55,6 +55,9 @@ var
   Command: string;
   Parts: TStringList;
   IPv6Addr: string;
+  Config: TBarevConfig;
+  ConfigFile: string;
+  ListenPort: Word;
   Buddy: TBarevBuddy;
   i: Integer;
   tmpNick, tmpAddr: string;
@@ -185,6 +188,7 @@ begin
   WriteLn('  --- Configuration ---');
   WriteLn('  loadconfig <file>     - Load configuration from file');
   WriteLn('  saveconfig            - Save current configuration');
+  WriteLn('  writeconfig           - Alias for saveconfig');
   WriteLn;
   WriteLn('  --- Avatars ---');
   WriteLn('  setavatar <path>      - Set your avatar image');
@@ -261,32 +265,76 @@ begin
 
   ParseCommandLine;
 
-  // Get local configuration
-  Write('Enter your nick: ');
-  ReadLn(Command);
+  ConfigFile := GetUserDir + '.barev' + PathDelim + 'barev.ini';
+  ListenPort := BAREV_DEFAULT_PORT;
+  Command := '';
+  IPv6Addr := '';
 
-  if Command = '' then
-  begin
-    WriteLn('Error: Nick is required');
-    Halt(1);
+  Config := TBarevConfig.Create(ConfigFile);
+  try
+    if Config.Load and Config.HasUserInfo then
+    begin
+      Command := Config.UserNick;
+      IPv6Addr := Config.UserIPv6;
+      ListenPort := Config.UserPort;
+      WriteLn('Loaded user info from config: ', ConfigFile);
+      WriteLn('Nick: ', Command);
+      WriteLn('IPv6: ', IPv6Addr);
+      WriteLn('Port: ', ListenPort);
+      WriteLn;
+    end
+    else
+    begin
+      Write('Enter your nick: ');
+      ReadLn(Command);
+
+      if Command = '' then
+      begin
+        WriteLn('Error: Nick is required');
+        Halt(1);
+      end;
+
+      Write('Enter your Yggdrasil IPv6 address: ');
+      ReadLn(IPv6Addr);
+
+      if (IPv6Addr = '') or not IsYggdrasilAddress(IPv6Addr) then
+      begin
+        WriteLn('Error: Valid Yggdrasil IPv6 address is required');
+        WriteLn('(Should start with 200:, 201:, 202:, 203:, 300:, 301:, 302:, 303:, 3ff:, etc.)');
+        Halt(1);
+      end;
+
+      Write('Enter listening port [', BAREV_DEFAULT_PORT, ']: ');
+      ReadLn(tmpAddr);
+      tmpAddr := Trim(tmpAddr);
+      if tmpAddr <> '' then
+      begin
+        try
+          ListenPort := StrToInt(tmpAddr);
+        except
+          on E: Exception do
+          begin
+            WriteLn('Error: invalid port: ', tmpAddr);
+            Halt(1);
+          end;
+        end;
+      end;
+
+      WriteLn;
+      WriteLn('No user info found in config.');
+      WriteLn('Use saveconfig or writeconfig to store your nick/IP/port into: ', ConfigFile);
+      WriteLn;
+    end;
+  finally
+    Config.Free;
   end;
 
-  Write('Enter your Yggdrasil IPv6 address: ');
-  ReadLn(IPv6Addr);
-
-  if (IPv6Addr = '') or not IsYggdrasilAddress(IPv6Addr) then
-  begin
-    WriteLn('Error: Valid Yggdrasil IPv6 address is required');
-    WriteLn('(Should start with 200:, 201:, 202:, 203:, 300:, 301:, 302:, 303:, 3ff:, etc.)');
-    Halt(1);
-  end;
-
-  WriteLn;
   WriteLn('Starting Barev client...');
 
   Parts := TStringList.Create;
   // Create client
-  Client := TBarevClient.Create(Command, IPv6Addr);
+  Client := TBarevClient.Create(Command, IPv6Addr, ListenPort);
+  Client.LoadConfig(ConfigFile);
 
   if not Client.Start then
   begin
@@ -464,7 +512,7 @@ begin
               end;
             end;
 
-          'saveconfig':
+          'saveconfig', 'writeconfig':
             begin
               if Client.SaveConfig then
                 WriteLn('Configuration saved')

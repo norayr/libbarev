@@ -217,11 +217,16 @@ begin
   if not FConfig.Load then
     Exit;
 
-  // Load user settings
-  FNick := FConfig.UserNick;
-  FMyIPv6 := FConfig.UserIPv6;
-  FPort := FConfig.UserPort;
-  FMyJID := FNick + '@' + FMyIPv6;
+  // Load user settings only if they exist in config.
+  // This allows using a contacts-only config file without wiping
+  // the identity that was already provided by the caller.
+  if FConfig.HasUserInfo then
+  begin
+    FNick := FConfig.UserNick;
+    FMyIPv6 := FConfig.UserIPv6;
+    FPort := FConfig.UserPort;
+    FMyJID := FNick + '@' + FMyIPv6;
+  end;
 
   // Load avatar if configured
   if (FConfig.UserAvatarPath <> '') and FileExists(FConfig.UserAvatarPath) then

@@ -39,6 +39,7 @@ type
     { Load/Save configuration }
     function Load: Boolean;
     function Save: Boolean;
+    function HasUserInfo: Boolean;
 
     { User settings }
     property UserNick: string read FUserNick write FUserNick;
@@ -139,6 +140,11 @@ begin
     Sections.Free;
     Ini.Free;
   end;
+end;
+
+function TBarevConfig.HasUserInfo: Boolean;
+begin
+  Result := (Trim(FUserNick) <> '') and (Trim(FUserIPv6) <> '');
 end;
 
 function TBarevConfig.Save: Boolean;
