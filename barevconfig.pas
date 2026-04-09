@@ -167,6 +167,12 @@ begin
     // Save contacts
     // First, clear all existing Contact- sections
     // (We will recreate them from our current list)
+    i := 0;
+    while Ini.SectionExists('Contact-' + IntToStr(i)) do
+    begin
+      Ini.EraseSection('Contact-' + IntToStr(i));
+      Inc(i);
+    end;
 
     for i := 0 to FContacts.Count - 1 do
     begin
